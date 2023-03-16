@@ -112,7 +112,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=loglevel, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
 
     try:    
-        overall_json = json.loads(run('qstat -f -F json').decode('latin-1'))['Jobs']
+        overall_json = json.loads(run('qstat -f -F json microbiome').decode('latin-1'))['Jobs']
     except:
         print('Malformed qstat JSON detected. Unable to parse output')
     microbiome_jobs = list([(jid, j) for (jid, j) in overall_json.items() if j['queue']=='microbiome'])

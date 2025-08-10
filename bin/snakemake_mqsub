@@ -69,6 +69,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--queue', help='Queue to submit to [default = mqsub default]')
     parser.add_argument('--segregated-log-files', action='store_true', help='Put log files in ~/qsub_logs/<date>/<directory> instead of the current working directory.')
+    parser.add_argument('--depend', help='Space separated list of ids for jobs this job should depend on.')
     # --dry-run
     parser.add_argument('--dry-run', action='store_true')
 
@@ -82,14 +83,16 @@ if __name__ == '__main__':
     job_properties = read_job_properties(jobscript)
 
     threads = job_properties['threads']
-    if 'mem_mb' in job_properties['resources']:
+    if 'mem_mb' in job_properties['resources'] and job_properties['resources']['mem_mb'] != '<TBD>':
         mem_mb = job_properties['resources']['mem_mb']
         mem_gb = int(mem_mb / 1024)
+        if mem_gb < 1:
+            mem_gb = 1
         mem_argument = "-m {}".format(mem_gb)
     else:
         mem_argument = ''
 
-    if 'runtime' in job_properties['resources']:
+    if 'runtime' in job_properties['resources'] and job_properties['resources']['runtime'] != '<TBD>':
         runtime_mins = job_properties['resources']['runtime'] # Fails with snakemake == 7.16.0, but works with 7.30.1
         runtime_hours = "--hours {}".format(int(runtime_mins / 60))
     else:
@@ -107,10 +110,27 @@ if __name__ == '__main__':
     else:
         segregated_log_files_arg = ''
 
+    gpu_arg = ''
+    if 'gpu_type' in job_properties['resources']:
+        gpu_type = job_properties['resources']['gpu_type']
+        if gpu_type in ['A100', 'H100']:
+            gpu_arg += ' --{}'.format(gpu_type)
+        else:
+            raise ValueError("gpu_type {} not supported".format(gpu_type))
+    elif 'gpus' in job_properties['resources']:
+        gpus = job_properties['resources']['gpus']
+        if gpus > 0:
+            gpu_arg = '--gpu {}'.format(gpus)
+
     if 'extra_mqsub_args' in job_properties['resources']:
         extra_mqsub_args = job_properties['resources']['extra_mqsub_args']
     else:
         extra_mqsub_args = ''
+
+    if args.depend:
+        depend = '--depend ' + args.depend
+    else:
+        depend = ''
 
     # Change the name because otherwise 'snakemake' takes all the characters on screen
     # But currently mqsub ignores this anyway, so definiting --name has no effect.
@@ -118,10 +138,16 @@ if __name__ == '__main__':
     # unedited e.g. snakejob.eggnog_mapper.sh | edited e.g. workflow..eggnog_mapper
     job_name = f'{os.path.basename(args.basedir)}.{os.path.basename(jobscript)}'.replace('snakejob','').replace('.sh','')
 
-    cmd = "mqsub --no-email --quiet --bg --name {job_name} -t {threads} {mem} {hours} --script {script} {queue} {segregated_log_files_arg} {extra_mqsub_args} 2>&1".format(
+    mqsub_command = 'mqsub'
+    if args.queue == 'aqua':
+        mqsub_command = 'mqsub_aqua'
+
+    cmd = "{mqsub_command} --no-email --quiet --bg --name {job_name} -t {threads} {mem} {gpu_arg} {hours} --script {script} {queue} {depend} {segregated_log_files_arg} {extra_mqsub_args} 2>&1".format(
+        mqsub_command=mqsub_command,
         job_name=job_name, extra_mqsub_args=extra_mqsub_args,
         threads=threads, script=jobscript, mem=mem_argument, hours=runtime_hours, queue=queue, 
-        segregated_log_files_arg=segregated_log_files_arg)
+        depend=depend, segregated_log_files_arg=segregated_log_files_arg,
+        gpu_arg=gpu_arg)
 
     if args.dry_run:
         print(cmd)

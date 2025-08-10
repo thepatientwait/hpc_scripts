@@ -1,0 +1,134 @@
+import os
+import pandas as pd
+from os.path import join
+
+DEFAULTS = {
+    "dorado_exec": "/work/microbiome/sw/dorado-v1.0.0/dorado-1.0.0-linux-x64/bin/dorado",
+    "models_directory": "/work/microbiome/sw/dorado-v1.0.0/dorado-1.0.0-linux-x64/models",
+    "output_dir": "cmr_dorado_output",
+    "kit_name": "SQK-NBD114-24",
+    "base_mods": "4mC_5mC 6mA",
+}
+
+
+pixi_run = "/work/microbiome/sw/pixi/latest/.pixi/bin/pixi run"
+
+# dorado_exec: "/work/microbiome/sw/dorado-v0.9.1/dorado-0.9.1-linux-x64/bin/dorado"
+# pod5_sample_list: "/work/microbiome/arctic/data/20240910/dorado-v0.9.0/test_snake/pod5_sample_list.txt"  # text file of POD5 sample filepaths
+# output_dir: "/" # path to output directory
+# models_directory: "/work/microbiome/sw/dorado-v0.9.1/models"
+# kit_name: "SQK-NBD114-24" # set barcoding kit as required
+# base_mods: # set base modifications as required separated by spaces e.g. "4mC_5mC 6mA"
+
+
+dorado = config["dorado_exec"] if "dorado_exec" in config else DEFAULTS["dorado_exec"]
+models_directory = config["models_directory"] if "models_directory" in config else DEFAULTS["models_directory"]
+outfolder = config["output_dir"] if "output_dir" in config else DEFAULTS["output_dir"]
+outfolder = os.path.abspath(outfolder)  # Ensure output directory is absolute path
+kit_name = config.get("kit_name", DEFAULTS["kit_name"])
+base_mods = config.get("base_mods", DEFAULTS["base_mods"])
+
+
+
+# Create necessary directories
+os.makedirs(join(outfolder,'logs'), exist_ok=True)
+os.makedirs(join(outfolder,'basecalled'), exist_ok=True)
+
+# Read POD5 file list
+pod5_files = pd.DataFrame(columns=["pod_id", "filepath"])
+with open(config["pod5_sample_list"]) as r:
+    for filepath in r:
+        pod5_files = pd.concat([pod5_files, pd.DataFrame({"pod_id": [os.path.basename(filepath.strip())], "filepath": [filepath.strip()]})])
+
+# Write parameter and command versions used to parameters.yaml in output directory
+# get version of dorado by running `dorado --version`
+import subprocess
+dorado_version = subprocess.check_output(["bash", "-c", f"{dorado} --version 2>&1"]).decode("utf-8").strip()
+samtools_version = subprocess.check_output(["bash", "-c", "samtools --version |head -1"]).decode("utf-8").strip()
+# Create parameters dictionary
+parameters = {
+    "dorado_exec": dorado,
+    "dorado_version": dorado_version,
+    "samtools_version": samtools_version,
+    "pod5_files": pod5_files["filepath"].tolist(),
+    "models_directory": models_directory,
+    "output_dir": outfolder,
+    "kit_name": kit_name,
+    "base_mods": base_mods,
+}
+import yaml
+# if parameters.yaml already exists, print a warning that it will be overwritten
+if os.path.exists(join(outfolder, "parameters.yaml")):
+    # In future could warn only if there are changes to the parameters. The problem is that snakemake might skip rules, so the new parameters might be wrong.
+    # For now, just warn that it will be overwritten.
+    print(f"Warning: {join(outfolder, 'parameters.yaml')} already exists and will be overwritten.")
+with open(join(outfolder, "parameters.yaml"), "w") as f:
+    yaml.dump(parameters, f)
+
+wildcard_constraints:
+    podfile = r".+\.pod5"  # Ensure the wildcard matches valid POD5 filenames
+
+rule all:
+    input:
+        join(outfolder, "demux.done"),
+        join(outfolder, "final_fastq.done")
+
+rule dorado_basecaller:
+    input:
+        pod5_file = lambda wildcards: pod5_files[pod5_files["pod_id"] == wildcards.podfile].iloc[0]["filepath"]
+    params:
+        model = "sup",
+        base_mods = "" if not base_mods else "--modified-bases " + base_mods,
+        kit_name = kit_name
+    output:
+        temp(join(outfolder, "basecalled", "{podfile}.bam"))
+    log:
+        join(outfolder, "logs", "{podfile}.log")
+    threads: 6
+    resources:
+        mem_mb=64*1024, # Having (possibly unrelated problems) using 8G
+        gpus=1,
+        runtime=24*60*2
+    shell:
+        "bash -c 'nvidia-smi 1>&2 && {dorado} basecaller {params.model} {input.pod5_file} {params.base_mods} --kit-name {params.kit_name} --models-directory {models_directory} > {output}' 2> {log}"
+
+rule dorado_demux:
+    input:
+        bam_files = expand(join(outfolder, "basecalled/{pod_id}.bam"), pod_id=pod5_files["pod_id"])
+    params:
+        options = "--no-classify",
+    output:
+        outfolder = directory(join(outfolder, "final_bamfiles")),
+        done = touch(join(outfolder, "demux.done"))
+    log:
+        join(outfolder, "logs", "demux.log")
+    threads: 1
+    resources:
+        mem_mb=8*1024, # guess work
+        runtime=12*60, # 12 hours - more than enough I think
+        gpus=1, # Possible it might work in CPU mode, but doesn't at least of the box.
+    shell:
+        "samtools merge -u - {input.bam_files} | {dorado} demux {params.options} --output-dir {output.outfolder} 2> {log}"
+
+rule generate_fastq:
+    input:
+        bam_folder = join(outfolder, "final_bamfiles"),
+        done = join(outfolder, "demux.done")
+    output:
+        fastq_folder = directory(join(outfolder, "fastq")),
+        done = touch(join(outfolder, "final_fastq.done"))
+    log:
+        join(outfolder, "logs", "generate_fastq.log")
+    threads: 8
+    resources:
+        mem_mb=8*1024, # guesswork
+        runtime=4*60 # 4 hours should be enough
+    shell:
+        # Output the samtools fastq -T MM,ML flags into the fastq, so any modifications in the BAM file are preserved in the FASTQ output.
+        """
+        mkdir -p {output.fastq_folder}
+        for bam_file in {input.bam_folder}/*.bam; do
+            base=$(basename "$bam_file" .bam)
+            samtools fastq -T MM,ML -@ {threads} "$bam_file" | pigz -p {threads} > {output.fastq_folder}/"$base".fastq.gz
+        done
+        """

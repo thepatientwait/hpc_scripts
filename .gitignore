@@ -1,0 +1,3 @@
+echo.done
+*.pyc
+__pycache__/

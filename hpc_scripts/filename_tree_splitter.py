@@ -7,6 +7,6 @@ class FilenameTreeSplitter:
                 break
             chunks.append(input_filename[index:(index+length)])
             index = index + length
-        if index < len(input_filename):
-            chunks.append(input_filename[index:])
+        # if index < len(input_filename):
+        #     chunks.append(input_filename[index:])
         return chunks

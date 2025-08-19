@@ -1,0 +1,10 @@
+executor: cluster-generic
+cluster-generic-submit-cmd: "snakemake_mqsub --segregated-log-files --queue aqua --depend \"{dependencies}\""
+cluster-generic-status-cmd: snakemake_mqstat
+jobs: 10000
+cluster-generic-cancel-cmd: qdel
+use-conda: true
+conda-frontend: mamba
+rerun-incomplete: true # Without this, snakemake will attempt to resume when rerunning a rule, which fails immediately without error
+immediate-submit: true
+notemp: true

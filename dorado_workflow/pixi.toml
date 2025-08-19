@@ -1,0 +1,13 @@
+[workspace]
+authors = ["Ben Woodcroft <benjwoodcroft@gmail.com>"]
+channels = ["conda-forge", "bioconda"]
+name = "dorado_workflow"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+snakemake = ">=9.5.1,<10"
+snakemake-executor-plugin-cluster-generic = ">=1.0.9,<2"
+samtools = ">=1.21,<2"

@@ -19,9 +19,9 @@ jobs:
       - name: Check mqsub --dry-run
         run: |
             python3 bin/mqsub --dry-run -- echo 'Hello world'
-      - name: Check mqstat
-        run: |
-            python3 bin/mqstat --help
+      # - name: Check mqstat # commented out because os.getlogin() fails on github actions
+      #   run: |
+      #       python3 bin/mqstat --help
       - name: Check mqwait
         run: |
             python3 bin/mqwait --help
@@ -34,26 +34,15 @@ jobs:
       - name: Check filename_tree_splitter
         run: |
             python3 bin/filename_tree_splitter -n 5 --names HelloWorld
+      - name: Check pixi_cmr_init --help
+        run: |
+            python3 bin/pixi_cmr_init.py --help
+      - name: Check pixi_cmr_init --dry-run
+        run: |
+            python3 bin/pixi_cmr_init.py --dry-run /tmp/test_pixi_init
+      - name: Run pixi_cmr_init tests
+        run: |
+            python3 -m unittest tests.test_pixi_cmr_init -v
 #      - name: Check filename_tree_unsplitter
 #        run: |
-#            python3 bin/filename_tree_unsplitter            
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        
+#            python3 bin/filename_tree_unsplitter

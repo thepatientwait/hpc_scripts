@@ -1,11 +1,9 @@
-#!/usr/bin/env python3.4
-
-# Must be python3.4-compatible since that is what is on the lyra base
+#!/usr/bin/env python3.9
 
 # Script to more easily submit jobs to the QUT HPC queuing system
 
 __author__ = "Ben Woodcroft, Peter Sternes"
-__copyright__ = "Copyright 2022"
+__copyright__ = "Copyright 2022-2025"
 __credits__ = ["Ben Woodcroft, Peter Sternes"]
 __license__ = "GPL3"
 __maintainer__ = "Ben Woodcroft, Peter Sternes"
@@ -27,6 +25,9 @@ import json
 import time
 from smtplib import SMTP
 import datetime
+import re
+
+DEFAULT_RAM_TO_CPU_RATIO = 1495.0 / 192.0
 
 ## Code below copied from the extern python package. Copy the code here so there are no dependencies.
 
@@ -134,14 +135,24 @@ class script_format:
     def header(outfile, prelude=None, segregated_logs_dir=None):
         print('#!/bin/bash -l',file=outfile)
         print('#PBS -l ncpus={}'.format(args.cpus),file=outfile)
-        print('#PBS -l ngpus={}'.format(args.gpu),file=outfile)        
+        print('#PBS -l ngpus={}'.format(args.gpu),file=outfile)
+        if args.gpu_type:
+            print('#PBS -l gpu_id={}'.format(args.gpu_type), file=outfile)
         print('#PBS -l mem={}gb'.format(mem),file=outfile)
         print('#PBS -l walltime={}:00:00'.format(hours),file=outfile)
         if args.bg and not args.no_email and not args.command_file and not (args.chunk_num or args.chunk_size):
             print('#PBS -m ae',file=outfile) # disbled emailing when running chunks. Too spammy
         print('#PBS -M {}'.format(email),file=outfile)
+        if args.array:
+            # normalize array format so that both "x-y" and "y" are accepted (with the latter being expanded to "1-y")
+            if '-' not in args.array:
+                args.array = '1-{}'.format(args.array)
+            print('#PBS -J {}'.format(args.array),file=outfile)
         if args.directive:
             print('#PBS {}'.format(args.directive),file=outfile)
+        if args.depend:
+            depend = ":".join(args.depend)
+            print('#PBS -W depend=afterok:{}'.format(depend),file=outfile)
         print('#PBS -q {}'.format(args.queue),file=outfile)
         if segregated_logs_dir:
             print('#PBS -o {}'.format(segregated_logs_dir),file=outfile)
@@ -150,13 +161,25 @@ class script_format:
             print('#PBS -N ' + command_name + str(chunkID) + '\n', file = outfile)
         else:
             print('#PBS -N {}'.format(jobname),file=outfile)
+        print('. /etc/bashrc',file=outfile) # Load the bashrc file
         print("cd '{}'".format(os.getcwd()), file=outfile) # cd to current directory      
         if prelude:
             print(prelude+'\n\n',file=outfile)
         if args.scratch_data:
             for dir in args.scratch_data:
                 if os.path.exists(os.path.abspath(dir)):
-                    print("\n#Copy scratch-data to TMPDIR for processing",file=outfile)
+                    print("\n#Copy scratch-data to /scratch for processing",file=outfile)
+                    print("export MSCRATCH=/scratch/cmr_mqsub/$PBS_JOBID",file=outfile)
+                    print("mkdir -p $MSCRATCH",file=outfile)
+                    print("cp -r -L '{}' $MSCRATCH".format(os.path.abspath(dir)),file=outfile)
+                    print("CP_EXITSTATUS=$?",file=outfile)
+                    print("if [[ $CP_EXITSTATUS -eq 0 ]]; then : ; else  echo 'Exit status $CP_EXITSTATUS. Exitted due to failed cp command'; exit $CP_EXITSTATUS ; fi",file=outfile)
+                else:
+                    raise Exception('{} not found. Exiting'.format(dir))
+        if args.tmp_data:
+            for dir in args.tmp_data:
+                if os.path.exists(os.path.abspath(dir)):
+                    print("\n#Copy tmp-data to TMPDIR for processing",file=outfile)
                     print("export MSCRATCH=$TMPDIR",file=outfile)
                     print("cp -r -L '{}' $MSCRATCH".format(os.path.abspath(dir)),file=outfile)
                     print("CP_EXITSTATUS=$?",file=outfile)
@@ -185,6 +208,12 @@ class script_format:
 
     @staticmethod
     def tail(outfile):
+        if args.scratch_data:
+            # Command to test for unexpected MSCRATCH variable changes
+            # ./bin/mqsub_aqua --scratch-data bin -- export MSCRATCH=/home/aroneys/src/hpc_scripts/test_delete/asdf
+            print("\n#Delete scratch-data from /scratch",file=outfile)
+            print("if [[ $MSCRATCH != /scratch/cmr_mqsub/* ]]; then echo 'MSCRATCH is not in /scratch/cmr_mqsub'; exit 1; fi",file=outfile)
+            print("if [[ -d $MSCRATCH ]]; then rm -rf $MSCRATCH || exit 1; fi",file=outfile)
         if args.run_tmp_dir:
             working_dir = os.getcwd()
             print("\nFINAL_EXITSTATUS=$?",file=outfile)
@@ -208,10 +237,10 @@ class script_format:
             with open(outfile.name) as script_written:
                 logging.debug("Script written was:\n{}".format(script_written.read()))
 
-            qsub_stdout = run("qsub {}".format(outfile.name)).decode()
+            qsub_stdout = run("TMPDIR={} qsub {}".format(args.script_tmpdir, outfile.name)).decode()
             logging.info("qsub stdout was: {}".format(qsub_stdout.rstrip()))
             if not args.bg:
-                match_result = re.compile('^(\d+\.pbs)\n$').match(qsub_stdout)
+                match_result = re.compile('^(\d+\.aqua)\n$').match(qsub_stdout)
                 if match_result is None:
                     raise Exception("Unexpected output from qsub: {}".format(qsub_stdout))
                 else:
@@ -332,35 +361,43 @@ if __name__ == '__main__':
                | |                
                |_|       
 Example usage:
-    mqsub -t 24 -m 250 --hours 168 -- aviary recover --pe-1 $R1 --pe-2 $R2 --max-threads 24 --n-cores 24 --output $runID.aviary.output 
-    mqsub -t 8 -m 32 --hours 168 --command-file file.txt --chunk-num 5''',formatter_class=RawTextHelpFormatter)    
+    mqsub -t 24 -m 250 --hours 48 -- aviary recover --pe-1 $R1 --pe-2 $R2 --max-threads 24 --n-cores 24 --output $runID.aviary.output 
+    mqsub -t 8 -m 32 --hours 48 --command-file file.txt --chunk-num 5''',formatter_class=RawTextHelpFormatter)    
     parser.add_argument('--debug', help='output debug information', action="store_true")
     #parser.add_argument('--version', help='output version information and quit',  action='version', version=repeatm.__version__)
     parser.add_argument('--quiet', help='only output errors', action="store_true")
     parser.add_argument('-t','--cpus',default=1,type=int, help="Number of CPUs to queue job with [default: 1]")
-    parser.add_argument('-g','--gpu',type=int,default=0, help="Number of GPUs to use [default: 0]")    
-    parser.add_argument('-m','--mem','--ram',type=int, help="GB of RAM to ask for [default: 8*num_cpus]")
+    gpu_group = parser.add_mutually_exclusive_group(required=False)
+    gpu_group.add_argument('-g','--gpu',type=int,default=0, help="Number of GPUs to use [default: 0]")
+    gpu_group.add_argument('--A100', action='store_true', help="Request 1 A100 GPU (old ones from lyra)")
+    gpu_group.add_argument('--H100', action='store_true', help="Request 1 H100 GPU (new with aqua)")
+    ram_ratio = round(DEFAULT_RAM_TO_CPU_RATIO, 2)
+    parser.add_argument('-m','--mem','--ram',type=int, help=f"GB of RAM to ask for [default: num_cpus*{ram_ratio} rounded down to the nearest GB]")
+    parser.add_argument('--array', help="Submit as an array job with the given number of tasks [default: Not used]")
     parser.add_argument('--directive', help="Arbitrary PBS directory to add e.g. '-l ngpus=1' to ask for a GPU [default: Not used]")
-    parser.add_argument('-q','--queue', default="microbiome", help="Name of queue to send to [default: 'microbiome']")
+    parser.add_argument('-q','--queue', default='aqua', help="Name of queue to send to [default: aqua]")
     walltime_group = parser.add_mutually_exclusive_group()
-    walltime_group.add_argument('--hours',default=24*7,type=int, help="Hours to run for [default: 1 week]")
-    walltime_group.add_argument('--days',type=int,help="Days to run for [default: 1 week]")
-    walltime_group.add_argument('--weeks',type=int,help="Weeks to run for [default 1]")
+    walltime_group.add_argument('--hours',default=48,type=int, help="Hours to run for [default: 48 hours]")
+    walltime_group.add_argument('--days',type=int,help="Days to run for [default: 2]")
+    walltime_group.add_argument('--weeks',type=int,help="Weeks to run for [default unspecified]")
     parser.add_argument('--name', help="Name of the job [default: first word of command]")
     parser.add_argument('--dry-run',action='store_true', help="Print script to STDOUT and do not lodge it with qsub")
     parser.add_argument('--bg',action='store_true', help="Submit the job, then quit [default: wait until job is finished before exiting]")
     parser.add_argument('--no-email',action='store_true', help="Do not send any emails, either on job finishing or aborting")
     parser.add_argument('--script', help='Script to run, or "-" for STDIN')
     parser.add_argument('--script-shell', help='Run script specified in --script with this shell [default: /bin/bash]', default='/bin/bash')
-    parser.add_argument('--script-tmpdir', help="When '--script -' is specified, write the script to this location as a temporary file", default='/mnt/hpccs01/scratch/microbiome/tmp')
+    parser.add_argument('--script-tmpdir', help="When '--script -' is specified, write the script to this location as a temporary file", default='/work/microbiome/scratch/tmp')
     parser.add_argument('--poll-interval', help="Poll the PBS server once every this many seconds [default: 30]", type=int, default=30)
     parser.add_argument('--no-executable-check', help="Usually mqsub checks the executable is currently available. Don't do this [default: do check]",action='store_true')
     parser.add_argument('--command-file',dest='command_file', help="A file with list of newline separated commands to be split into chunks and submitted. One command per line. mqsub --command-file <file.txt> --chunk-num <int>")
     parser.add_argument('--chunk-num',type=int,dest='chunk_num', help='Number of chunks to divide the commands (from --command-file) into')
     parser.add_argument('--chunk-size',type=int,dest='chunk_size', help='Number of commands (from --command-file) per a chunk ')
     parser.add_argument('--prelude', help='Code from this file will be run before each chunk')
-    parser.add_argument('--scratch-data', dest='scratch_data', nargs='+', help='Data to be copied to a scratch space prior to running the main command(s). Useful for databases used in large chunks of jobs.')
+    temp_data_group = parser.add_mutually_exclusive_group()
+    temp_data_group.add_argument('--scratch-data', dest='scratch_data', nargs='+', help='Data to be copied to a scratch space prior to running the main command(s). Useful for databases used in large chunks of jobs. Use \$MSCRATCH to refer to the location.')
+    temp_data_group.add_argument('--tmp-data', dest='tmp_data', nargs='+', help='Data to be copied to a tmp space prior to running the main command(s). Useful for databases used in large chunks of jobs. Use \$TMPDIR to refer to the location. tmp space can fill up if you are running many in parallel, in which case use --scratch-data instead.')
     parser.add_argument('--run-tmp-dir', dest='run_tmp_dir',action='store_true', help='Executes your command(s) on the local SSD ($TMPDIR/mqsub_processing) of a node. IMPORTANT: Use absolute paths for your input files, and a relative path for your output.')
+    parser.add_argument('--depend', nargs='+', help='Space separated list of ids for jobs this job should depend on.')
     parser.add_argument('--segregated-log-files', action='store_true', help='Put log files in ~/qsub_logs/<date>/<directory> instead of the current working directory.')
     parser.add_argument('command',nargs='*',help='command to be run')
     parser.epilog = '''
@@ -398,8 +435,12 @@ Further information can also be found in the CMR Compute Notes -  https://tinyur
     else:
         raise Exception("Must specify either --script-stdin, command, or a --command-file to chunk")
 
-    if os.path.exists('/pkg/hpc/scripts/time_until_outage.sh'):
-        time_left = run('bash /pkg/hpc/scripts/time_until_outage.sh').decode().rstrip().split(':')[0]
+    def strip_ansi_codes(s):
+        return re.sub(r'\x1b\[[0-9;]*m', '', s)
+
+    if os.path.exists('/usr/local/bin/time_until_outage.sh'):
+        raw_time_left = run('bash /usr/local/bin/time_until_outage.sh').decode().rstrip().split(':')[0]
+        time_left = strip_ansi_codes(raw_time_left)
     else:
         time_left = int(7890000) 
     if args.hours is not None:
@@ -408,16 +449,22 @@ Further information can also be found in the CMR Compute Notes -  https://tinyur
         time_required = int(args.days) * 24
     if args.weeks is not None:
         time_required = int(args.weeks) * 168
-    if int(time_required) > int(time_left):
+    if time_required > 48:
+        time_required = 48 # This is only for comparison with time_left - the walltime set in the PBS script is changed elsewhere.
+    if time_left == "TBA":
+        sys.stderr.write('\n###################################################################')
+        sys.stderr.write('\nWARNING: The time until server maintenance is not available. Maintenance is likely imminent.')
+        sys.stderr.write('\n###################################################################\n\n')
+    elif int(time_required) > int(time_left):
         sys.stderr.write('\n###################################################################')
         sys.stderr.write('\nWARNING: The requested walltime coincides with server maintenance.')
         sys.stderr.write('\n###################################################################\n\n')
 
     if args.mem is None:
-        mem = int(7.8125*args.cpus)
+        mem = int(DEFAULT_RAM_TO_CPU_RATIO*args.cpus)
     else:
         mem = args.mem
-    if mem < 8 and args.queue == 'lyra' and (args.scratch_data or args.run_tmp_dir):
+    if mem < 8 and args.queue == 'aqua' and (args.scratch_data or args.tmp_data or args.run_tmp_dir):
         mem = 8
         logging.debug("Using RAM {}".format(mem))
 
@@ -428,27 +475,22 @@ Further information can also be found in the CMR Compute Notes -  https://tinyur
         hours = 24*args.days
     else:
         hours = args.hours
-
-    if args.mem is not None and args.cpus is not None:
-        if args.mem > 250 and args.cpus/124 != args.mem/1000 :
-            sys.stderr.write('\n#######################################################################################################')
-            sys.stderr.write('\nWARNING: The number of CPUs is not scaled to the amount of RAM')
-            sys.stderr.write('\nGiven each node has 124 CPUs and ~1000 GB RAM, some properly scaled examples are:')
-            sys.stderr.write('\n31 CPU + 250 RAM | 62 CPU + 500 RAM | 93 CPU and 750 RAM')
-            sys.stderr.write('\ni.e. 25% of the CPUs should typically be matched with 25% of the RAM, on so on')
-            sys.stderr.write('\nThis helps ensure that resources are fully utilised when all the CPU or RAM of a node has been reserved')
-            sys.stderr.write('\n#######################################################################################################\n\n')
-    if args.mem is not None:
-        if args.mem == 128 or args.mem == 256 or args.mem == 512 or args.mem == 768:
-            sys.stderr.write('\n##############################################################################################################')
-            sys.stderr.write('\nWARNING: An inefficient amount of RAM has been requested')
-            sys.stderr.write('\nGiven each node has ~1000 GB RAM, using the following RAM amount enables jobs to fit onto a nodes more easily:')
-            sys.stderr.write('\n125 GB | 250 GB | 500 GB | 750 GB')
-            sys.stderr.write('\n##############################################################################################################\n\n')        
+    if hours > 48:
+        logging.warning("The requested walltime is greater than 48 hours. Truncating to 48 since aquarius cannot currently handle longer running jobs.")
+        hours = 48       
 
     whoami = getpass.getuser()
     email = '{}@qut.edu.au'.format(whoami)
     logging.debug("Using email address: {}".format(email))
+
+    if args.A100:
+        args.gpu = 1
+        args.gpu_type = 'A100'
+    elif args.H100:
+        args.gpu = 1
+        args.gpu_type = 'H100'
+    else:
+        args.gpu_type = None
 
 
 #%% RUN CHUNKS ##############################

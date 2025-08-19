@@ -1,0 +1,36 @@
+# Save terminal history so commands can be immediately reused in the terminal session - doesn't work though I think
+history -a
+
+mkdir -p ~/.hpc_scripts/mqinteractive_scripts
+# This also deletes the previous script
+echo "cd $PWD" > ~/.hpc_scripts/mqinteractive_scripts/latest.sh
+chmod +x ~/.hpc_scripts/mqinteractive_scripts/latest.sh
+
+# Activate the current conda env if there is one. Does not work?
+if [ -n "$CONDA_PREFIX" ]; then
+    echo "source activate $CONDA_PREFIX" >> ~/.hpc_scripts/mqinteractive_scripts/latest.sh
+fi
+
+# if "a" or "attach" is the first argument, attach to the latest interactive session
+if [ "$1" == "a" ] || [ "$1" == "attach" ]; then
+    JOB_ID=`qstat -u $USER cpu_inter_exec | tail -n 1 | awk '{print $1}'`
+    # if exists, attach
+    if [ -n "$JOB_ID" ]; then
+        /pkg/hpc/scripts/ssh-to-job $JOB_ID
+        exit
+    else
+        echo "No interactive session to attach to, starting a new one .."
+    fi
+
+elif [ "$1" == "gpu" ]; then
+    # NOTE: keep in sync with usual invocation below
+    qsub -I -l select=1:ncpus=8:mem=32GB:ngpus=1,walltime=12:00:00
+
+elif [ -n "$1" ]; then
+    echo "Unknown argument: $1"
+    exit 1
+    
+else
+    # NOTE: keep in sync with gpu invocation above
+    qsub -I -l select=1:ncpus=8:mem=32GB,walltime=12:00:00
+fi

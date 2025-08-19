@@ -31,19 +31,25 @@ import argparse
 import logging
 import sys
 import os
+import tarfile
 
 sys.path = [os.path.join(os.path.dirname(os.path.realpath(__file__)),'..')] + sys.path
 from hpc_scripts.filename_tree_splitter import FilenameTreeSplitter
 
 if __name__ == '__main__':
-    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser = argparse.ArgumentParser()
     parent_parser.add_argument('--debug', help='output debug information', action="store_true")
     #parent_parser.add_argument('--version', help='output version information and quit',  action='version', version=repeatm.__version__)
     parent_parser.add_argument('--quiet', help='only output errors', action="store_true")
 
     parent_parser.add_argument('-n','--split-lengths',nargs='+',type=int, help='Split input names into these chunk of this length.', required=True)
     parent_parser.add_argument('--names', nargs='+', help='Split these file names [default: Use names on STDIN].')
-    parent_parser.add_argument('--print-folder', action="store_true", help='Print the folder name to as an extra column e.g. to feed into "mkdir -p"')
+    parent_parser.add_argument('--tar-gz', help='Extract a tar.gz file instead of reading stdin/--names, putting each file within the tar to the split up directory structure [default: Use names on STDIN].')
+    parent_parser.add_argument('--output-map', help='Output a map of old -> new names to this file.')
+    parent_parser.add_argument('--print-folder', action="store_true", help='Print the folder name as an extra column in the output e.g. to feed into "mkdir -p"')
+    parent_parser.add_argument('--move', action="store_true", help='Move the files to the new location, creating directories as needed. In the case of a tar.gz file, the files will be copied, not moved, to the new location.')
+    parent_parser.add_argument('--move-dry-run', action="store_true", help='Show what would be moved, but don\'t actually move anything.')
+    parent_parser.add_argument('--skip-first-pass', action="store_true", help='Skip the first pass of the input, which is used to check for clashes, and print output map. Instead just do the move/move-dry-run.')
 
     args = parent_parser.parse_args()
 
@@ -56,22 +62,86 @@ if __name__ == '__main__':
         loglevel = logging.INFO
     logging.basicConfig(level=loglevel, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
 
-    output_filenames = set()
     splitter = FilenameTreeSplitter()
 
     if args.names:
         to_iterate = args.names
+    elif args.tar_gz:
+        # open streaming for speed
+        to_iterate = tarfile.open(args.tar_gz, 'r|gz') # transparent compression, streaming only
     else:
         to_iterate = sys.stdin
+        # Read everything in, so we can check for clashes first
+        to_iterate = list(to_iterate)
+        logging.info("Read {} lines".format(len(to_iterate)))
 
-    for line in to_iterate:
-        base = os.path.basename(line.strip())
-        chunks = splitter.chunks(args.split_lengths, base)
+    if not args.skip_first_pass:
+        output_map = None
+        max_folder_entries = 0
+        max_folder_name = ''
+        folder_to_entries = {}
+        if args.output_map:
+            output_map = open(args.output_map, 'w')
+        for line0 in to_iterate:
+            if args.tar_gz:
+                line = line0.name
+            else:
+                line = line0
+            base = os.path.basename(line.strip())
+            chunks = splitter.chunks(args.split_lengths, base)
+                    
+            if args.print_folder:
+                to_print = [line.strip(), '/'.join(chunks)+'/'+base, '/'.join(chunks)]
+            else:
+                to_print = [line.strip(), '/'.join(chunks)+'/'+base]
 
-        if '/'.join(chunks) in output_filenames:
-            raise Exception("Found a clash: {}".format('/'.join(chunks)))
-        if args.print_folder:
-            to_print = [line.strip(), '/'.join(chunks)+'/'+base, '/'.join(chunks)]
-        else:
-            to_print = [line.strip(), '/'.join(chunks)+'/'+base]
-        print("\t".join(to_print))
+            last_folder = None
+            final_filename_chunks = chunks + [base]
+            for i in range(len(final_filename_chunks)):
+                if i == 0:
+                    continue
+                else:
+                    last_folder = '/'.join(final_filename_chunks[:i])
+                folder = '/'.join(final_filename_chunks[:(i + 1)])
+                if last_folder not in folder_to_entries:
+                    folder_to_entries[last_folder] = set()
+                folder_to_entries[last_folder].add(folder)
+                num_entries = len(folder_to_entries[last_folder])
+                if num_entries > max_folder_entries:
+                    max_folder_entries = num_entries
+                    max_folder_name = last_folder
+
+            if args.output_map:
+                output_map.write("\t".join(to_print)+'\n')
+
+        if output_map:
+            output_map.close()
+
+        logging.info("Max folder entries: {}: {}".format(max_folder_name, max_folder_entries))
+
+    if args.move or args.move_dry_run:
+        for line0 in to_iterate:
+            # logging.debug("line0: {}".format(line0))
+            if args.tar_gz:
+                if line0.isdir():
+                    continue
+                line = line0.name
+            else:
+                line = line0
+            base = os.path.basename(line.strip())
+            chunks = splitter.chunks(args.split_lengths, base)
+        
+            directory = '/'.join(chunks)
+            log_msg = "{} -> {}/{}".format(line.strip(), directory, base)
+            if args.move_dry_run:
+                logging.info(log_msg)
+            else:
+                logging.debug(log_msg)
+            if args.move:
+                os.makedirs(directory, exist_ok=True)
+                if args.tar_gz:
+                    f = to_iterate.extractfile(line0)
+                    with open("{}/{}".format(directory, base), 'wb') as f2:
+                        f2.write(f.read())
+                else:
+                    os.rename(line.strip(), "{}/{}".format(directory, base))

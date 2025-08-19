@@ -1,6 +1,4 @@
-#!/usr/bin/env python3.4
-
-# Must be python3.4-compatible since that is what is on the lyra base
+#!/usr/bin/env python3
 
 # Script to more easily submit jobs to the QUT HPC queuing system
 
@@ -104,9 +102,9 @@ class PbsJobInfo:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='''
       _ __ ___   __ ___      ____ _(_) |_
-     | '_ ` _ \ / _` \ \ /\ / / _` | | __|
-     | | | | | | (_| |\ V  V / (_| | | |_
-     |_| |_| |_|\__, | \_/\_/ \__,_|_|\__|
+     | '_ ` _ \\ / _` \\ \\ /\\ / / _` | | __|
+     | | | | | | (_| |\\ V  V / (_| | | |_
+     |_| |_| |_|\\__, | \\_/\\_/ \\__,_|_|\\__|
                    |_|
 
     Typing 'mqwait' will email you once all your currently queued jobs finish.
@@ -119,7 +117,7 @@ if __name__ == '__main__':
                  \'mqsub_jobs.sh |& mqwait -m\'
 
     ''',formatter_class=RawTextHelpFormatter)
-    parser.add_argument('-i', help='Input file containing a newline separated list of PBS job names (i.e. 123456.pbs)', required=False, dest='i', metavar='file')
+    parser.add_argument('-i', help='Input file containing a newline separated list of PBS job names (i.e. 123456.pbs), or "-" to read from STDIN', required=False, dest='i', metavar='file')
     parser.add_argument('-p', help='Polling rate (in seconds) [default = 60]',  default=60.0, dest='p', metavar='secs', type=int)
     parser.add_argument('-l', help='Verbosely displays the number of remaining jobs. Controlled by the polling rate (-p)', action='store_true', default=False, dest='l')
     parser.add_argument('-m', help='Takes piped output from mqsub and waits on those jobs.', action='store_true', default=False, dest='m')
@@ -153,35 +151,27 @@ if __name__ == '__main__':
                 all_jobs = PbsJobInfo.all_jobs()
                 all_names = PbsJobInfo.all_names_user()
             elif args.i is not None:
-                    file1 = open(args.i,"r")
-                    file2 = open('temp_joblist','w')
-                    for line in file1:
-                        file2.write(line)
-                    file1.close()
-                    file2.close()
-                    with open('temp_joblist') as file:
+                input_file = args.i
+                if input_file == '-':
+                    print('Reading from stdin...')
+                    all_jobs = sys.stdin.read().splitlines()
+                else:
+                    with open(input_file) as file:
                         all_jobs = file.read().splitlines()
-                        all_jobs = list(filter(str.strip, all_jobs))
-                        print('-i specified, mqwait will notify when {} of those jobs complete...'.format(len(all_jobs)))
-                        if not any(i in all_jobs for i in current_jobs):
-                            print('WARNING. Some of the jobs specified in the input file are not currently running. Exiting')
-                            sys.exit()
-                        else:
-                            with open('temp_joblist') as file:
-                                all_jobs = file.read().splitlines()
-                                all_jobs = list(filter(str.strip, all_jobs))
-                                all_names=[]
-                                for i in all_jobs:
-                                    cmd = 'qstat -r ' + i + ' | tail -n +6 | column -t | awk \'{print $4}\''
-                                    name = run(cmd).decode().splitlines()
-                                    all_names += name
-                    os.system('rm temp_joblist')
+                all_jobs = list(filter(str.strip, all_jobs))
+                print('-i specified, mqwait will notify when those {} jobs complete...'.format(len(all_jobs)))
+
+                all_names=[]
+                for i in all_jobs:
+                    cmd = 'qstat -x -r ' + i + ' | tail -n +6 | column -t | awk \'{print $4}\''
+                    name = run(cmd).decode().splitlines()
+                    all_names += name
             break
-        except:
+        except ExternCalledProcessError as e:
             print('Server issues may be occuring. Sleeping for 2 min...')
             time.sleep(120)
 
-    #%% run qstat every arg.p seconds to compare lists
+    # %% run qstat every arg.p seconds to compare lists
     starttime = time.time()
     while True:
         current_jobs = PbsJobInfo.current_jobs()
